@@ -1,23 +1,39 @@
-# OS files
-.DS_Store
-Thumbs.db
-desktop.ini
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
-# Editor files
+# Build outputs
+dist/
+build/
+*.zip
+
+# IDE files
 .vscode/
 .idea/
 *.swp
 *.swo
-*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
 
 # Temporary files
 *.tmp
-*.log
-*.bak
+*.temp
 
-# Node modules (if any)
-node_modules/
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
 
-# Build files
-dist/
-build/
+# Chrome Extension specific
+*.crx
+*.pem
+*.key
