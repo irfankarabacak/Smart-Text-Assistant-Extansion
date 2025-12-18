@@ -24,7 +24,7 @@ async function loadTheme() {
 // Tema Uygula (Sadece açık popup varsa)
 function applyTheme(theme) {
   currentTheme = theme;
-  
+
   // Açık popup varsa tema class'ını güncelle
   if (processingPopup) {
     if (theme === 'dark') {
@@ -54,8 +54,65 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 // Sayfa yüklenince temayı yükle
 loadTheme();
 
-// Hemen başlat
+// Debounce helper
+let selectionDebounceTimer = null;
+
+// Debug mode - sorun giderme için
+const DEBUG_MODE = true;
+function debugLog(...args) {
+  if (DEBUG_MODE) console.log('🤖 STA:', ...args);
+}
+
+debugLog('Content script yüklendi - ' + window.location.href);
+
+// Görsel onay kaldırıldı - Kullanıcı isteği üzerine sessiz çalışma modu
+
+// Hemen başlat - birden fazla event dinle
 document.addEventListener('mouseup', handleTextSelection, true);
+document.addEventListener('selectionchange', handleSelectionChange, true);
+
+// Son bilinen mouse pozisyonu
+let lastMouseX = 0;
+let lastMouseY = 0;
+
+// Mouse pozisyonunu sürekli takip et
+document.addEventListener('mousemove', (e) => {
+  lastMouseX = e.clientX;
+  lastMouseY = e.clientY;
+}, true);
+
+// Selection değiştiğinde çağrılır (alternatif tetikleyici)
+function handleSelectionChange() {
+  // Sadece popup kapalıyken kontrol et
+  if (processingPopup) return;
+
+  const selectedText = window.getSelection().toString().trim();
+
+  if (selectedText.length > 3) {
+    // Debounce
+    if (selectionDebounceTimer) {
+      clearTimeout(selectionDebounceTimer);
+    }
+
+    selectionDebounceTimer = setTimeout(() => {
+      const currentText = window.getSelection().toString().trim();
+      if (currentText.length > 3 && !selectionButton) {
+        debugLog('selectionchange ile buton gösteriliyor');
+        currentSelection = currentText;
+
+        // Selection rect'ten pozisyon al
+        const selection = window.getSelection();
+        if (selection.rangeCount > 0) {
+          const range = selection.getRangeAt(0);
+          const rect = range.getBoundingClientRect();
+          showButton(rect.right + 5, rect.bottom + 5);
+        } else {
+          showButton(lastMouseX + 10, lastMouseY + 10);
+        }
+      }
+    }, 200);
+  }
+}
 
 function handleTextSelection(event) {
   // Kendi elementlerimize tıklandıysa ignore et
@@ -63,11 +120,17 @@ function handleTextSelection(event) {
   if (target.closest('.sta-popup') || target.closest('.sta-selection-btn') || target.id === 'sta-selection-btn') {
     return;
   }
-  
-  // Biraz bekle ki selection tamamlansın
-  setTimeout(() => {
+
+  // Debounce - önceki timer'ı iptal et
+  if (selectionDebounceTimer) {
+    clearTimeout(selectionDebounceTimer);
+  }
+
+  // Biraz bekle ki selection tamamlansın (debounced)
+  selectionDebounceTimer = setTimeout(() => {
     const selectedText = window.getSelection().toString().trim();
-    
+    debugLog('mouseup - seçili metin:', selectedText.length, 'karakter');
+
     // Popup açıkken seçili metin varsa güncelle, yoksa popup'ı kapat
     if (processingPopup) {
       if (selectedText.length > 3) {
@@ -80,16 +143,18 @@ function handleTextSelection(event) {
       }
       return;
     }
-    
+
     // Popup kapalıyken
     if (selectedText.length > 3) {
       // Yeni metin seçildi, buton göster
       currentSelection = selectedText;
-      
+
       // Mouse pozisyonunu sakla
       const mouseX = event.clientX;
       const mouseY = event.clientY;
-      
+
+      debugLog('Buton gösteriliyor, pozisyon:', mouseX, mouseY);
+
       // Butonu oluştur ve göster
       showButton(mouseX, mouseY);
     } else {
@@ -103,14 +168,16 @@ function handleTextSelection(event) {
 }
 
 function showButton(x, y) {
+  debugLog('showButton çağrıldı, x:', x, 'y:', y);
+
   // Önce eski butonu temizle
   if (selectionButton) {
     try {
       selectionButton.remove();
-    } catch (e) {}
+    } catch (e) { }
     selectionButton = null;
   }
-  
+
   // Yeni buton oluştur
   const btn = document.createElement('div');
   btn.id = 'sta-selection-btn';
@@ -120,21 +187,21 @@ function showButton(x, y) {
   btn.setAttribute('aria-label', 'Metin işleme için Akıllı Metin Asistanını aç');
   btn.setAttribute('role', 'button');
   btn.setAttribute('tabindex', '0');
-  
+
   // Seçili metnin alanını al
   const selection = window.getSelection();
   let buttonX = x + 5;
   let buttonY = y + 5; // Mouse'un hemen yanında
-  
+
   // Eğer selection range varsa, seçili alanın yakınına yerleştir
   if (selection.rangeCount > 0) {
     const range = selection.getRangeAt(0);
     const rect = range.getBoundingClientRect();
-    
+
     // Seçili metnin alt-sağ köşesinin hemen yanına yerleştir
     buttonX = rect.right + 5;
     buttonY = rect.bottom + 5;
-    
+
     // Ekran dışına taşma kontrolü
     if (buttonX + 40 > window.innerWidth) {
       buttonX = window.innerWidth - 50; // Sağdan 50px içeride
@@ -143,10 +210,22 @@ function showButton(x, y) {
       buttonY = rect.top - 45; // Seçili metnin üstüne koy (taşıyorsa)
     }
   }
-  
+
+  // Viewport sınırları kontrolü - daha agresif
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+
+  // Butonun viewport içinde kalmasını garantile
+  if (buttonX < 10) buttonX = 10;
+  if (buttonY < 10) buttonY = 10;
+  if (buttonX + 50 > viewportWidth) buttonX = viewportWidth - 60;
+  if (buttonY + 50 > viewportHeight) buttonY = viewportHeight - 60;
+
+  debugLog('Düzeltilmiş pozisyon:', buttonX, buttonY, 'Viewport:', viewportWidth, 'x', viewportHeight);
+
   // FIXED POSITION kullan - viewport'a göre sabitlenecek
+  // NOT: 'all: initial' kaldırıldı çünkü display'i sıfırlıyordu
   btn.style.cssText = `
-    all: initial !important;
     font-family: system-ui, -apple-system, sans-serif !important;
     position: fixed !important;
     left: ${buttonX}px !important;
@@ -159,6 +238,8 @@ function showButton(x, y) {
     border: 2px solid white !important;
     border-radius: 50% !important;
     display: flex !important;
+    visibility: visible !important;
+    opacity: 1 !important;
     align-items: center !important;
     justify-content: center !important;
     cursor: pointer !important;
@@ -167,8 +248,14 @@ function showButton(x, y) {
     transition: all 0.2s ease !important;
     user-select: none !important;
     pointer-events: auto !important;
+    box-sizing: border-box !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    transform: none !important;
+    min-width: 40px !important;
+    min-height: 40px !important;
   `;
-  
+
   // Kapatma butonu ekle
   const closeBtn = document.createElement('div');
   closeBtn.className = 'sta-close-btn-selection';
@@ -193,9 +280,9 @@ function showButton(x, y) {
   `;
   closeBtn.textContent = '✕';
   closeBtn.setAttribute('title', 'Kapat');
-  
+
   // Kapatma butonuna tıklama eventi
-  closeBtn.addEventListener('click', function(e) {
+  closeBtn.addEventListener('click', function (e) {
     e.preventDefault();
     e.stopPropagation();
     e.stopImmediatePropagation();
@@ -204,23 +291,23 @@ function showButton(x, y) {
       selectionButton = null;
     }
   }, true);
-  
+
   // Ana butona önce kapatma butonunu ekle
   btn.appendChild(closeBtn);
-  
+
   // Hover efekti
-  btn.addEventListener('mouseenter', function() {
+  btn.addEventListener('mouseenter', function () {
     this.style.transform = 'scale(1.2) rotate(15deg)';
     this.style.boxShadow = '0 12px 30px rgba(102, 126, 234, 0.5)';
   });
-  
-  btn.addEventListener('mouseleave', function() {
+
+  btn.addEventListener('mouseleave', function () {
     this.style.transform = 'scale(1) rotate(0deg)';
     this.style.boxShadow = '0 8px 20px rgba(0,0,0,0.4)';
   });
-  
+
   // Click handler - kapatma butonuna tıklanmadıysa popup aç
-  btn.addEventListener('click', function(e) {
+  btn.addEventListener('click', function (e) {
     // Eğer kapatma butonuna tıklandıysa, popup açma
     if (e.target.classList.contains('sta-close-btn-selection')) {
       return;
@@ -230,9 +317,9 @@ function showButton(x, y) {
     e.stopImmediatePropagation();
     openPopup();
   }, true);
-  
+
   // Keyboard navigation
-  btn.addEventListener('keydown', function(e) {
+  btn.addEventListener('keydown', function (e) {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       openPopup();
@@ -241,10 +328,22 @@ function showButton(x, y) {
       selectionButton = null;
     }
   });
-  
+
   // DOM'a ekle
-  document.body.appendChild(btn);
-  selectionButton = btn;
+  try {
+    // Önce mevcut butonu kontrol et ve sil
+    const existingBtn = document.getElementById('sta-selection-btn');
+    if (existingBtn) {
+      existingBtn.remove();
+    }
+
+    document.body.appendChild(btn);
+    selectionButton = btn;
+
+    debugLog('Buton DOM\'a eklendi:', btn.id, 'Pozisyon:', btn.style.left, btn.style.top);
+  } catch (error) {
+    debugLog('Buton eklenirken hata:', error);
+  }
 }
 
 function openPopup() {
@@ -253,17 +352,17 @@ function openPopup() {
     selectionButton.remove();
     selectionButton = null;
   }
-  
+
   // Eski popup varsa kaldır
   if (processingPopup) {
     processingPopup.remove();
   }
-  
+
   // Yeni popup oluştur
   const popup = document.createElement('div');
   popup.id = 'sta-processing-popup';
   popup.className = `sta-popup${currentTheme === 'dark' ? ' sta-dark-theme' : ''}`;
-  
+
   popup.innerHTML = `
     <div class="sta-popup-header" id="sta-drag-handle" style="cursor: grab; user-select: none;">
       <span class="sta-popup-title">🤖 Akıllı Metin Asistanı</span>
@@ -328,13 +427,13 @@ function openPopup() {
       </div>
     </div>
   `;
-  
+
   // Event listeners
   popup.querySelector('#sta-close').onclick = () => {
     popup.remove();
     processingPopup = null;
   };
-  
+
   const actionBtns = popup.querySelectorAll('[data-action]');
   actionBtns.forEach(btn => {
     btn.onclick = () => {
@@ -344,7 +443,7 @@ function openPopup() {
       refreshPromptIfOpen();
     };
   });
-  
+
   const styleBtns = popup.querySelectorAll('[data-style]');
   styleBtns.forEach(btn => {
     btn.onclick = () => {
@@ -354,17 +453,17 @@ function openPopup() {
       refreshPromptIfOpen();
     };
   });
-  
+
   popup.querySelector('#sta-process').onclick = processText;
   popup.querySelector('#sta-view-prompt').onclick = viewPrompt;
-  
+
   // Seçili metin expand/collapse
   let isExpanded = false;
   popup.querySelector('#sta-expand-text').onclick = () => {
     const content = popup.querySelector('#sta-selected-content');
     const btn = popup.querySelector('#sta-expand-text');
     const fullText = content.getAttribute('data-full-text');
-    
+
     if (!isExpanded) {
       content.textContent = fullText;
       content.style.maxHeight = '300px';
@@ -377,14 +476,14 @@ function openPopup() {
       isExpanded = false;
     }
   };
-  
-  
+
+
   // Sürüklenebilir yap
   makeDraggable(popup);
-  
+
   document.body.appendChild(popup);
   processingPopup = popup;
-  
+
   // Aktif provider'ı güncelle
   updateActiveProviderInContentPopup();
 }
@@ -392,7 +491,7 @@ function openPopup() {
 // Content popup için aktif provider güncelleme
 async function updateActiveProviderInContentPopup() {
   if (!processingPopup) return;
-  
+
   try {
     const response = await chrome.runtime.sendMessage({ type: 'GET_ACTIVE_PROVIDER' });
     if (response && response.success) {
@@ -410,7 +509,7 @@ async function updateActiveProviderInContentPopup() {
 // Provider display name helper (content için)
 function getProviderDisplayNameContent(provider) {
   if (!provider) return 'Varsayılan AI';
-  
+
   const names = {
     'groq': 'Groq',
     'openai': 'OpenAI',
@@ -459,7 +558,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 // Popup açıkken seçili metni güncelle
 function updateSelectedTextInPopup(newText) {
   if (!processingPopup) return;
-  
+
   // Prompt ekranı açıksa, kapat ve normal ekrana dön
   const outputDiv = processingPopup.querySelector('#sta-output');
   if (outputDiv && outputDiv.getAttribute('data-prompt-open') === 'true') {
@@ -468,11 +567,11 @@ function updateSelectedTextInPopup(newText) {
     outputDiv.removeAttribute('data-current-action');
     outputDiv.removeAttribute('data-current-style');
   }
-  
+
   const selectedContent = processingPopup.querySelector('#sta-selected-content');
   const expandBtn = processingPopup.querySelector('#sta-expand-text');
   const selectedLabel = processingPopup.querySelector('.sta-selected-label span');
-  
+
   if (selectedContent) {
     // Karakter sayısını güncelle - limit durumunu göster
     if (selectedLabel) {
@@ -482,20 +581,20 @@ function updateSelectedTextInPopup(newText) {
     }
     // Yeni metni güncelle
     selectedContent.setAttribute('data-full-text', newText);
-    
+
     // Kısa veya uzun metne göre gösterim
     if (newText.length > 150) {
       selectedContent.textContent = newText.substring(0, 150) + '...';
     } else {
       selectedContent.textContent = newText;
     }
-    
+
     // Expand durumunu sıfırla
     selectedContent.style.maxHeight = '100px';
     if (expandBtn) {
       expandBtn.textContent = '👁️ Tümünü Gör';
     }
-    
+
     // Görsel feedback (yumuşak fade animasyonu)
     selectedContent.style.opacity = '0.3';
     selectedContent.style.transition = 'opacity 0.4s ease';
@@ -513,45 +612,45 @@ function makeDraggable(element) {
   let currentY;
   let initialX;
   let initialY;
-  
+
   handle.addEventListener('mousedown', dragStart);
   document.addEventListener('mousemove', drag);
   document.addEventListener('mouseup', dragEnd);
-  
+
   function dragStart(e) {
     // Close button'a tıklanırsa ignore et
     if (e.target.closest('.sta-close-btn')) return;
-    
+
     // Popup'un mevcut pozisyonunu al
     const rect = element.getBoundingClientRect();
     initialX = e.clientX - rect.left;
     initialY = e.clientY - rect.top;
-    
+
     isDragging = true;
     handle.style.cursor = 'grabbing';
   }
-  
+
   function drag(e) {
     if (isDragging) {
       e.preventDefault();
-      
+
       currentX = e.clientX - initialX;
       currentY = e.clientY - initialY;
-      
+
       // Sadece minimum sınır kontrol et (2. monitöre geçebilsin)
       // Y ekseninde negatif değer olabilir (yukarı taşma)
       currentY = Math.max(-50, currentY); // En az 50px header görünsün
-      
+
       // X ekseni serbestte bırak (2. monitör için)
       // Sadece ekran dışına tamamen kaymasını engelle
-      
+
       element.style.left = currentX + 'px';
       element.style.top = currentY + 'px';
       element.style.right = 'auto';
       element.style.bottom = 'auto';
     }
   }
-  
+
   function dragEnd() {
     isDragging = false;
     handle.style.cursor = 'grab';
@@ -561,7 +660,7 @@ function makeDraggable(element) {
 // Prompt'ı görüntüle ve düzenle (toggle)
 async function viewPrompt() {
   const outputDiv = document.querySelector('#sta-output');
-  
+
   // Eğer prompt ekranı açıksa, kapat (normal ekrana dön)
   if (outputDiv.getAttribute('data-prompt-open') === 'true') {
     outputDiv.innerHTML = '<div class="sta-loading">🤖 Yapay zeka hazır</div>';
@@ -570,13 +669,13 @@ async function viewPrompt() {
     outputDiv.removeAttribute('data-current-style');
     return;
   }
-  
+
   // Prompt kapalıysa, aç
   const mainAction = document.querySelector('[data-action].active').dataset.action;
   const processingStyle = document.querySelector('[data-style].active').dataset.style;
   const targetLanguage = document.querySelector('#sta-language').value;
   const additionalInstructions = document.querySelector('#sta-instructions').value;
-  
+
   // usePageTitle ayarını kontrol et
   let pageTitle = null;
   try {
@@ -588,7 +687,7 @@ async function viewPrompt() {
     //console.error('Ayarlar alınamadı, sayfa başlığı kullanılıyor:', error);
     pageTitle = document.title; // Hata durumunda varsayılan
   }
-  
+
   // Background'dan prompt şablonunu al
   try {
     chrome.runtime.sendMessage({
@@ -629,31 +728,31 @@ async function viewPrompt() {
 // Düzenlenebilir prompt göster
 function showEditablePrompt(promptText, mainAction, processingStyle) {
   const outputDiv = document.querySelector('#sta-output');
-  
+
   outputDiv.innerHTML = '';
-  
+
   // Prompt düzenleme ekranının açık olduğunu işaretle
   outputDiv.setAttribute('data-prompt-open', 'true');
   outputDiv.setAttribute('data-current-action', mainAction);
   outputDiv.setAttribute('data-current-style', processingStyle);
-  
+
   // Header
   const header = document.createElement('div');
   header.className = 'sta-prompt-header';
   header.textContent = '📜 Gönderilecek Prompt';
   outputDiv.appendChild(header);
-  
+
   // Düzenlenebilir textarea
   const textarea = document.createElement('textarea');
   textarea.className = 'sta-prompt-editor';
   textarea.value = promptText;
   textarea.readOnly = true;
   outputDiv.appendChild(textarea);
-  
+
   // Buton container
   const btnContainer = document.createElement('div');
   btnContainer.className = 'sta-prompt-buttons';
-  
+
   // Düzenle butonu
   const editBtn = document.createElement('button');
   editBtn.className = 'sta-prompt-btn sta-edit-btn';
@@ -666,7 +765,7 @@ function showEditablePrompt(promptText, mainAction, processingStyle) {
     resetBtn.style.display = 'inline-block';
   };
   btnContainer.appendChild(editBtn);
-  
+
   // Kaydet butonu
   const saveBtn = document.createElement('button');
   saveBtn.className = 'sta-prompt-btn sta-save-btn';
@@ -674,7 +773,7 @@ function showEditablePrompt(promptText, mainAction, processingStyle) {
   saveBtn.style.display = 'none';
   saveBtn.onclick = () => showSaveModal(textarea.value, mainAction, processingStyle, editBtn, saveBtn, resetBtn, textarea);
   btnContainer.appendChild(saveBtn);
-  
+
   // Varsayılana Dön butonu
   const resetBtn = document.createElement('button');
   resetBtn.className = 'sta-prompt-btn sta-reset-btn';
@@ -682,7 +781,7 @@ function showEditablePrompt(promptText, mainAction, processingStyle) {
   resetBtn.style.display = 'none';
   resetBtn.onclick = () => resetToDefault(mainAction, processingStyle, textarea, editBtn, saveBtn, resetBtn);
   btnContainer.appendChild(resetBtn);
-  
+
   // Kopyala butonu
   const copyBtn = document.createElement('button');
   copyBtn.className = 'sta-prompt-btn sta-copy-btn';
@@ -693,7 +792,7 @@ function showEditablePrompt(promptText, mainAction, processingStyle) {
     setTimeout(() => copyBtn.textContent = '📋 Kopyala', 2000);
   };
   btnContainer.appendChild(copyBtn);
-  
+
   outputDiv.appendChild(btnContainer);
 }
 
@@ -703,22 +802,22 @@ async function refreshPromptIfOpen() {
   if (!outputDiv || outputDiv.getAttribute('data-prompt-open') !== 'true') {
     return; // Prompt ekranı açık değil
   }
-  
+
   // Mevcut seçimleri al
   const mainAction = document.querySelector('[data-action].active').dataset.action;
   const processingStyle = document.querySelector('[data-style].active').dataset.style;
-  
+
   // Eğer değişiklik yoksa yenileme
   const currentAction = outputDiv.getAttribute('data-current-action');
   const currentStyle = outputDiv.getAttribute('data-current-style');
   if (currentAction === mainAction && currentStyle === processingStyle) {
     return; // Değişiklik yok
   }
-  
+
   // Yeni prompt'u getir
   const targetLanguage = document.querySelector('#sta-language').value;
   const additionalInstructions = document.querySelector('#sta-instructions').value;
-  
+
   // usePageTitle ayarını kontrol et
   let pageTitle = null;
   try {
@@ -730,7 +829,7 @@ async function refreshPromptIfOpen() {
     //console.error('Ayarlar alınamadı, sayfa başlığı kullanılıyor:', error);
     pageTitle = document.title; // Hata durumunda varsayılan
   }
-  
+
   chrome.runtime.sendMessage({
     type: 'GET_PROMPT_PREVIEW',
     data: {
@@ -756,14 +855,14 @@ async function processText() {
   const processingStyle = document.querySelector('[data-style].active').dataset.style;
   const targetLanguage = document.querySelector('#sta-language').value;
   const additionalInstructions = document.querySelector('#sta-instructions').value;
-  
+
   const outputDiv = document.querySelector('#sta-output');
-  
+
   // Metin uzunluk kontrolü - sadece ücretsiz AI için
   try {
     const response = await chrome.runtime.sendMessage({ type: 'GET_ACTIVE_PROVIDER' });
     const activeProvider = response?.activeProvider;
-    
+
     // Sadece ücretsiz Pollinations AI için limit uygula
     if (!activeProvider && currentSelection.length > 5000) {
       outputDiv.innerHTML = `
@@ -802,9 +901,9 @@ async function processText() {
   } catch (error) {
     // Hata durumunda devam et
   }
-  
+
   outputDiv.innerHTML = '<div class="sta-loading">🤖 Yapay zeka çalışıyor...</div>';
-  
+
   // usePageTitle ayarını kontrol et
   let pageTitle = null;
   try {
@@ -816,13 +915,13 @@ async function processText() {
     //console.error('Ayarlar alınamadı, sayfa başlığı kullanılıyor:', error);
     pageTitle = document.title; // Hata durumunda varsayılan
   }
-  
+
   try {
     // Extension context kontrolü
     if (!chrome.runtime?.id) {
       throw new Error('Eklenti yeniden yüklendi. Sayfayı yenileyin (F5).');
     }
-    
+
     const response = await chrome.runtime.sendMessage({
       type: 'PROCESS_TEXT',
       data: {
@@ -834,11 +933,11 @@ async function processText() {
         targetLanguage
       }
     });
-    
+
     if (response && response.success) {
       // Sonucu temizle - başındaki/sonundaki gereksiz etiketleri kaldır
       let cleanedResult = response.data.result.trim();
-      
+
       // Tüm olası etiketleri kaldır (başta ve tekrarlı)
       cleanedResult = cleanedResult
         .replace(/^(Düzeltilmiş|Geliştirilmiş|Yeniden düzenlenmiş|Sonuç|Metin|Prompt|Cevap|Yanıt)(\s*:)?\s*/gi, '')
@@ -849,19 +948,19 @@ async function processText() {
         .replace(/\s*```$/gi, '') // Sondaki code block
         .replace(/^\*\*.*?\*\*\s*/gi, '') // Baştaki bold işaretleri
         .trim();
-      
+
       // Sonuç container'ı oluştur
       outputDiv.innerHTML = '';
-      
+
       const resultText = document.createElement('div');
       resultText.className = 'sta-result-text';
       resultText.textContent = cleanedResult;
       outputDiv.appendChild(resultText);
-      
+
       // Buton container'ı
       const btnContainer = document.createElement('div');
       btnContainer.className = 'sta-button-container';
-      
+
       // Kopyala butonu
       const copyBtn = document.createElement('button');
       copyBtn.textContent = '📋 Kopyala';
@@ -876,18 +975,18 @@ async function processText() {
         }, 2000);
       };
       btnContainer.appendChild(copyBtn);
-      
+
       // Yeniden İşle butonu
       const retryBtn = document.createElement('button');
       retryBtn.textContent = '🔄 Yeniden İşle';
       retryBtn.className = 'sta-retry-btn';
       retryBtn.onclick = () => processText();
       btnContainer.appendChild(retryBtn);
-      
+
       outputDiv.appendChild(btnContainer);
     } else {
       const errorMsg = response?.error || 'Bilinmeyen hata';
-      
+
       // API anahtarı hatası ise özel gösterim
       if (errorMsg.includes('API Anahtarı Gerekli') || errorMsg.includes('🔑')) {
         outputDiv.innerHTML = `
@@ -909,7 +1008,7 @@ async function processText() {
             </button>
           </div>
         `;
-        
+
         // Event listener ekle
         setTimeout(() => {
           const settingsBtn = outputDiv.querySelector('#sta-open-settings');
@@ -983,9 +1082,9 @@ function showSaveModal(promptText, mainAction, processingStyle, editBtn, saveBtn
       <small>Bir kerelik: Sadece bu seferlik kullanılır<br>Kalıcı: Ayarlara kaydedilir</small>
     </div>
   `;
-  
+
   document.body.appendChild(modal);
-  
+
   // Bir kerelik kaydet
   modal.querySelector('#sta-save-temp').onclick = () => {
     // Prompt'ı geçici olarak sakla (güvenli)
@@ -997,7 +1096,7 @@ function showSaveModal(promptText, mainAction, processingStyle, editBtn, saveBtn
     modal.remove();
     showNotification('✓ Prompt bir kerelik olarak kaydedildi!', 'success');
   };
-  
+
   // Kalıcı kaydet
   modal.querySelector('#sta-save-perm').onclick = () => {
     savePromptPermanently(promptText, mainAction, processingStyle);
@@ -1007,7 +1106,7 @@ function showSaveModal(promptText, mainAction, processingStyle, editBtn, saveBtn
     resetBtn.style.display = 'none';
     modal.remove();
   };
-  
+
   // İptal
   modal.querySelector('#sta-save-cancel').onclick = () => {
     modal.remove();
@@ -1017,11 +1116,11 @@ function showSaveModal(promptText, mainAction, processingStyle, editBtn, saveBtn
 // Prompt'ı kalıcı kaydet
 function savePromptPermanently(promptText, mainAction, processingStyle) {
   const templateId = `template${mainAction === 'improve' ? (processingStyle === 'faithful' ? '1' : '2') : (processingStyle === 'faithful' ? '3' : '4')}`;
-  
+
   chrome.storage.local.get('custom_prompts', (result) => {
     const customPrompts = result.custom_prompts || {};
     customPrompts[templateId] = promptText;
-    
+
     chrome.storage.local.set({ custom_prompts: customPrompts }, () => {
       // Ayarlar pop'a bildirim gönder (sync için)
       chrome.runtime.sendMessage({
@@ -1036,9 +1135,9 @@ function savePromptPermanently(promptText, mainAction, processingStyle) {
 // Varsayılana dön
 async function resetToDefault(mainAction, processingStyle, textarea, editBtn, saveBtn, resetBtn) {
   if (!confirm('Prompt varsayılan haline dönsün mü?')) return;
-  
+
   const templateId = `template${mainAction === 'improve' ? (processingStyle === 'faithful' ? '1' : '2') : (processingStyle === 'faithful' ? '3' : '4')}`;
-  
+
   // usePageTitle ayarını kontrol et
   let pageTitle = null;
   try {
@@ -1050,12 +1149,12 @@ async function resetToDefault(mainAction, processingStyle, textarea, editBtn, sa
     //console.error('Ayarlar alınamadı, sayfa başlığı kullanılıyor:', error);
     pageTitle = document.title; // Hata durumunda varsayılan
   }
-  
+
   // Storage'dan sil
   chrome.storage.local.get('custom_prompts', (result) => {
     const customPrompts = result.custom_prompts || {};
     delete customPrompts[templateId];
-    
+
     chrome.storage.local.set({ custom_prompts: customPrompts }, () => {
       // Varsayılan prompt'ı getir
       chrome.runtime.sendMessage({
@@ -1075,13 +1174,13 @@ async function resetToDefault(mainAction, processingStyle, textarea, editBtn, sa
           editBtn.style.display = 'inline-block';
           saveBtn.style.display = 'none';
           resetBtn.style.display = 'none';
-          
+
           // Ayarlar popup'a bildirim gönder
           chrome.runtime.sendMessage({
             type: 'PROMPT_RESET',
             data: { templateId }
           });
-          
+
           showNotification('✓ Prompt varsayılan haline döndürüldü! Ayarlar menüsü de güncellendi.', 'success');
         }
       });
@@ -1108,9 +1207,9 @@ function showNotification(message, type = 'info') {
     word-wrap: break-word;
   `;
   notification.textContent = message;
-  
+
   document.body.appendChild(notification);
-  
+
   setTimeout(() => {
     notification.remove();
   }, 3000);

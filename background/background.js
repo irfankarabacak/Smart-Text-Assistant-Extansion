@@ -40,17 +40,12 @@ function getAIEngine() {
 // ============================================================================
 
 /**
- * Dinamik şifreleme anahtarı oluşturur
+ * Sabit şifreleme anahtarı
+ * NOT: Dinamik anahtar her service worker restart'ında değişiyordu
+ * bu da kaydedilmiş API key'lerin çözülemez hale gelmesine neden oluyordu.
+ * Sabit anahtar kullanarak bu sorun çözüldü.
  */
-function generateEncryptionKey() {
-  const baseKey = 'SmartTextAssistant2024';
-  const timestamp = Date.now().toString();
-  const randomPart = Math.random().toString(36).substring(2, 15);
-  return baseKey + timestamp.slice(-8) + randomPart;
-}
-
-// Şifreleme anahtarı (basit XOR için) - Dinamik oluşturuluyor
-const ENCRYPTION_KEY = generateEncryptionKey();
+const ENCRYPTION_KEY = 'SmartTextAssistant2024SecureStaticKey';
 
 /**
  * Basit XOR şifreleme - UTF-8 güvenli
@@ -74,7 +69,8 @@ function xorEncrypt(text) {
 }
 
 /**
- * XOR şifre çözme
+ * XOR şifre çözme - UTF-8 güvenli
+ * Eski anahtarla şifrelenmiş verileri de kurtarmayı dener
  */
 function xorDecrypt(encoded) {
   try {
@@ -85,10 +81,20 @@ function xorDecrypt(encoded) {
         text.charCodeAt(i) ^ ENCRYPTION_KEY.charCodeAt(i % ENCRYPTION_KEY.length)
       );
     }
-    return result;
+    // UTF-8 decode dene
+    try {
+      return decodeURIComponent(escape(result));
+    } catch (e) {
+      // UTF-8 decode başarısız, direkt döndür
+      return result;
+    }
   } catch (error) {
-    //console.error('Şifre çözme hatası:', error);
-    return '';
+    // Fallback: Belki sadece Base64 ile encode edilmiş
+    try {
+      return decodeURIComponent(escape(atob(encoded)));
+    } catch (e) {
+      return '';
+    }
   }
 }
 
@@ -99,17 +105,17 @@ async function saveAPIKey(provider, apiKey, customEndpoint = null, customModel =
   try {
     const encrypted = xorEncrypt(apiKey);
     const storageKey = `api_key_${provider}`;
-    
+
     const dataToSave = {
       [storageKey]: encrypted,
       [`${storageKey}_provider`]: provider
     };
-    
+
     if (provider === 'custom' && customEndpoint) {
       dataToSave[`${storageKey}_endpoint`] = customEndpoint;
       dataToSave[`${storageKey}_model`] = customModel || '';
     }
-    
+
     await chrome.storage.local.set(dataToSave);
   } catch (error) {
     //console.error('API anahtarı kaydetme hatası:', error);
@@ -124,7 +130,7 @@ async function getAPIKey(provider) {
   try {
     const storageKey = `api_key_${provider}`;
     const result = await chrome.storage.local.get(storageKey);
-    
+
     if (result[storageKey]) {
       return xorDecrypt(result[storageKey]);
     }
@@ -167,7 +173,7 @@ async function deleteAPIKey(provider) {
     const storageKey = `api_key_${provider}`;
     // T\u00fcm ili\u015fkili keyleri sil
     await chrome.storage.local.remove([
-      storageKey, 
+      storageKey,
       `${storageKey}_provider`,
       `${storageKey}_endpoint`,
       `${storageKey}_model`
@@ -188,7 +194,7 @@ async function getCustomEndpoint(provider) {
   try {
     const storageKey = `api_key_${provider}`;
     const result = await chrome.storage.local.get([`${storageKey}_endpoint`, `${storageKey}_model`]);
-    
+
     if (result[`${storageKey}_endpoint`]) {
       return {
         endpoint: result[`${storageKey}_endpoint`],
@@ -207,7 +213,7 @@ async function getCustomEndpoint(provider) {
  */
 async function getActiveProvider() {
   try {
-const providers = ['openai', 'claude', 'gemini', 'cohere', 'groq', 'custom'];
+    const providers = ['openai', 'claude', 'gemini', 'cohere', 'groq', 'custom'];
     // Kullanıcı tercih ettiği sağlayıcıyı öncele
     const selected = await getSelectedProvider();
     if (selected) {
@@ -216,7 +222,7 @@ const providers = ['openai', 'claude', 'gemini', 'cohere', 'groq', 'custom'];
         return selected;
       }
     }
-    
+
     for (const provider of providers) {
       const key = await getAPIKey(provider);
       if (key) {
@@ -237,16 +243,16 @@ async function saveToHistory(operation) {
   try {
     const result = await chrome.storage.local.get('history');
     let history = result.history || [];
-    
+
     history.unshift({
       ...operation,
       timestamp: new Date().toISOString()
     });
-    
+
     if (history.length > 20) {
       history = history.slice(0, 20);
     }
-    
+
     await chrome.storage.local.set({ history });
   } catch (error) {
     //console.error('Geçmişe kaydetme hatası:', error);
@@ -273,7 +279,7 @@ async function deleteHistoryItem(index) {
   try {
     const result = await chrome.storage.local.get('history');
     let history = result.history || [];
-    
+
     if (index >= 0 && index < history.length) {
       history.splice(index, 1);
       await chrome.storage.local.set({ history });
@@ -467,12 +473,12 @@ function selectTemplate(mainAction, processingStyle) {
 async function getPromptTemplate(mainAction, processingStyle, selectedText, pageTitle, additionalInstructions = '', targetLanguage = 'Türkçe') {
   // Maksimum prompt uzunluğu - güvenli limit (çoğu AI modeli için)
   const MAX_PROMPT_LENGTH = 6000; // Güvenli limit
-  
+
   // Custom promptları kontrol et
   try {
     const result = await chrome.storage.local.get('custom_prompts');
     const customPrompts = result.custom_prompts || {};
-    
+
     // Template ID'sini belirle
     let templateId = '';
     if (mainAction === 'improve' && processingStyle === 'faithful') {
@@ -488,10 +494,10 @@ async function getPromptTemplate(mainAction, processingStyle, selectedText, page
     } else if (mainAction === 'summarize' && processingStyle === 'enhance') {
       templateId = 'template6';
     }
-    
+
     // Custom prompt varsa onu kullan, yoksa default
     let template = customPrompts[templateId] || selectTemplate(mainAction, processingStyle);
-    
+
     // Şablonun temel uzunluğunu hesapla (seçili metin olmadan)
     const baseTemplate = template
       .replace(/{Seçilen_Metin}/g, '')
@@ -499,22 +505,22 @@ async function getPromptTemplate(mainAction, processingStyle, selectedText, page
       .replace(/{Ek_Talimatlar}/g, additionalInstructions || 'Yok')
       .replace(/{Hedef_Dil}/g, targetLanguage)
       .replace(/{Randomness}/g, '000000');
-    
+
     const baseLength = baseTemplate.length;
     const maxTextLength = MAX_PROMPT_LENGTH - baseLength;
-    
+
     // Seçili metni gerekirse kısalt - sadece ücretsiz AI için
     let finalText = selectedText;
-    
+
     // Aktif provider kontrolü
     const activeProviderResult = await chrome.storage.local.get('selected_provider');
     const activeProvider = activeProviderResult.selected_provider;
-    
+
     // Sadece ücretsiz Pollinations AI için limit uygula
     if (!activeProvider && selectedText.length > maxTextLength) {
       finalText = selectedText.substring(0, maxTextLength - 50) + '\n\n[Metin çok uzun olduğu için kısaltıldı]';
     }
-    
+
     // Placeholder'ları değiştir
     const randomness = Math.floor(Math.random() * 1000000);
     template = template.replace(/{Seçilen_Metin}/g, finalText);
@@ -522,15 +528,15 @@ async function getPromptTemplate(mainAction, processingStyle, selectedText, page
     template = template.replace(/{Ek_Talimatlar}/g, additionalInstructions || 'Yok');
     template = template.replace(/{Hedef_Dil}/g, targetLanguage);
     template = template.replace(/{Randomness}/g, randomness.toString());
-    
+
     return template;
   } catch (error) {
     // Hata durumunda default template kullan
     //console.error('Custom prompt yükleme hatası, default kullanılıyor:', error);
-    
+
     const MAX_PROMPT_LENGTH = 6000;
     let template = selectTemplate(mainAction, processingStyle);
-    
+
     // Şablonun temel uzunluğunu hesapla
     const baseTemplate = template
       .replace(/{Seçilen_Metin}/g, '')
@@ -538,22 +544,22 @@ async function getPromptTemplate(mainAction, processingStyle, selectedText, page
       .replace(/{Ek_Talimatlar}/g, additionalInstructions || 'Yok')
       .replace(/{Hedef_Dil}/g, targetLanguage)
       .replace(/{Randomness}/g, '000000');
-    
+
     const baseLength = baseTemplate.length;
     const maxTextLength = MAX_PROMPT_LENGTH - baseLength;
-    
+
     // Seçili metni gerekirse kısalt - sadece ücretsiz AI için
     let finalText = selectedText;
-    
+
     // Aktif provider kontrolü
     const activeProviderResult = await chrome.storage.local.get('selected_provider');
     const activeProvider = activeProviderResult.selected_provider;
-    
+
     // Sadece ücretsiz Pollinations AI için limit uygula
     if (!activeProvider && selectedText.length > maxTextLength) {
       finalText = selectedText.substring(0, maxTextLength - 50) + '\n\n[Metin çok uzun olduğu için kısaltıldı]';
     }
-    
+
     const randomness = Math.floor(Math.random() * 1000000);
     template = template.replace(/{Seçilen_Metin}/g, finalText);
     template = template.replace(/{Sayfa_Başlığı}/g, pageTitle || 'Belirtilmemiş');
@@ -569,7 +575,7 @@ async function getPromptTemplate(mainAction, processingStyle, selectedText, page
 // ============================================================================
 const POLLINATIONS_ENDPOINT = 'https://text.pollinations.ai';
 const GROQ_ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
-const MAX_RETRIES = 2;
+const MAX_RETRIES = 3;
 const RETRY_DELAY = 2000;
 
 /**
@@ -586,10 +592,10 @@ async function callPollinations(prompt, retryCount = 0) {
   try {
     //console.log('Pollinations AI API \u00e7a\u011fr\u0131s\u0131 yap\u0131l\u0131yor (\u00fccretsiz - openai)...');
     //console.log('Prompt uzunlu\u011fu:', prompt.length, 'karakter');
-    
+
     // POST endpoint - model URL'de belirtilmeli
     const url = `${POLLINATIONS_ENDPOINT}?model=openai`;
-    
+
     const response = await fetch(url, {
       method: 'POST',
       headers: {
@@ -605,15 +611,17 @@ async function callPollinations(prompt, retryCount = 0) {
         seed: Date.now()
       })
     });
-    
+
 
     if (!response.ok) {
-      if (response.status === 503 && retryCount < MAX_RETRIES) {
-        //console.log(`Servis yüklenemiyor, ${RETRY_DELAY/1000} saniye sonra tekrar deneniyor...`);
-        await wait(RETRY_DELAY);
+      // Retry edilebilir hatalar (503, 429, 500, 502, 504)
+      const retryableStatuses = [503, 429, 500, 502, 504];
+      if (retryableStatuses.includes(response.status) && retryCount < MAX_RETRIES) {
+        const delay = RETRY_DELAY * (retryCount + 1); // Progressive delay
+        await wait(delay);
         return await callPollinations(prompt, retryCount + 1);
       }
-      
+
       let errorDetail = '';
       try {
         const errorData = await response.text();
@@ -622,17 +630,30 @@ async function callPollinations(prompt, retryCount = 0) {
       } catch (parseError) {
         errorDetail = response.statusText;
       }
-      
+
       throw new Error(`API hatası ${response.status}: ${errorDetail}`);
     }
 
     // Response düz text olarak geliyor (JSON değil)
     const result = await response.text();
-    //console.log('AI yanıtı alındı, uzunluk:', result.length);
+
+    // Boş yanıt kontrolü
+    if (!result || result.trim().length === 0) {
+      if (retryCount < MAX_RETRIES) {
+        await wait(RETRY_DELAY);
+        return await callPollinations(prompt, retryCount + 1);
+      }
+      throw new Error('AI boş yanıt döndürdü');
+    }
+
     return result.trim();
-    
+
   } catch (error) {
-    //console.error('Pollinations AI API hatası:', error);
+    // Network hatası - retry dene
+    if (error.message && error.message.includes('fetch') && retryCount < MAX_RETRIES) {
+      await wait(RETRY_DELAY);
+      return await callPollinations(prompt, retryCount + 1);
+    }
     throw new Error(`AI çağrısı başarısız: ${error.message}`);
   }
 }
@@ -642,12 +663,12 @@ async function callPollinations(prompt, retryCount = 0) {
  */
 async function callGroq(prompt, apiKey, retryCount = 0) {
   try {
-    
+
     const response = await fetch(GROQ_ENDPOINT, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-'Authorization': `Bearer ${apiKey}`
+        'Authorization': `Bearer ${apiKey}`
       },
       body: JSON.stringify({
         model: 'llama-3.3-70b-versatile',
@@ -661,15 +682,17 @@ async function callGroq(prompt, apiKey, retryCount = 0) {
         max_tokens: 2000
       })
     });
-    
+
 
     if (!response.ok) {
-      if (response.status === 503 && retryCount < MAX_RETRIES) {
-        //console.log(`Servis yüklenemiyor, ${RETRY_DELAY/1000} saniye sonra tekrar deneniyor...`);
-        await wait(RETRY_DELAY);
-return await callGroq(prompt, apiKey, retryCount + 1);
+      // Retry edilebilir hatalar
+      const retryableStatuses = [503, 429, 500, 502, 504];
+      if (retryableStatuses.includes(response.status) && retryCount < MAX_RETRIES) {
+        const delay = RETRY_DELAY * (retryCount + 1);
+        await wait(delay);
+        return await callGroq(prompt, apiKey, retryCount + 1);
       }
-      
+
       let errorDetail = '';
       try {
         const errorData = await response.json();
@@ -678,7 +701,7 @@ return await callGroq(prompt, apiKey, retryCount + 1);
       } catch (parseError) {
         errorDetail = response.statusText;
       }
-      
+
       throw new Error(`API hatası ${response.status}: ${errorDetail}`);
     }
 
@@ -686,7 +709,7 @@ return await callGroq(prompt, apiKey, retryCount + 1);
     const result = data.choices[0].message.content;
     //console.log('AI yanıtı alındı, uzunluk:', result.length);
     return result.trim();
-    
+
   } catch (error) {
     //console.error('Groq AI API hatası:', error);
     throw new Error(`AI çağrısı başarısız: ${error.message}`);
@@ -698,7 +721,7 @@ return await callGroq(prompt, apiKey, retryCount + 1);
  */
 async function callOpenAI(prompt, apiKey) {
   try {
-    
+
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -733,7 +756,7 @@ async function callOpenAI(prompt, apiKey) {
  */
 async function callClaude(prompt, apiKey) {
   try {
-    
+
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -775,7 +798,7 @@ async function callGemini(prompt, apiKey) {
  */
 async function callGeminiWithFallback(prompt, apiKey) {
   //console.log('Gemini API - en basit test başlatılıyor...');
-  
+
   try {
     // Sadece en temel model ile test
     const result = await callGeminiBasic(prompt, apiKey);
@@ -783,7 +806,7 @@ async function callGeminiWithFallback(prompt, apiKey) {
     return result;
   } catch (error) {
     //console.log('❌ Gemini hatası:', error.message);
-    
+
     // Alternatif yaklaşım dene
     try {
       //console.log('🔄 Alternatif Gemini yaklaşımı deneniyor...');
@@ -802,7 +825,7 @@ async function callGeminiWithFallback(prompt, apiKey) {
  */
 async function callGeminiAlternative(prompt, apiKey) {
   //console.log('🔄 Alternatif Gemini modelleri deneniyor...');
-  
+
   // Mevcut modelleri sırayla dene
   const fallbackModels = [
     'gemini-2.0-flash',
@@ -811,7 +834,7 @@ async function callGeminiAlternative(prompt, apiKey) {
     'gemini-1.5-flash',
     'gemini-1.5-pro'
   ];
-  
+
   for (const model of fallbackModels) {
     try {
       //console.log(`🔄 ${model} modeli deneniyor...`);
@@ -823,7 +846,7 @@ async function callGeminiAlternative(prompt, apiKey) {
       continue;
     }
   }
-  
+
   throw new Error('Hiçbir Gemini modeli çalışmıyor');
 }
 
@@ -832,7 +855,7 @@ async function callGeminiAlternative(prompt, apiKey) {
  */
 async function callGeminiWithModel(prompt, apiKey, model) {
   const url = `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${apiKey}`;
-  
+
   const body = {
     contents: [{
       parts: [{ text: prompt }]
@@ -858,7 +881,7 @@ async function callGeminiWithModel(prompt, apiKey, model) {
   }
 
   const data = await response.json();
-  
+
   if (data.candidates && data.candidates.length > 0) {
     const candidate = data.candidates[0];
     if (candidate.content && candidate.content.parts && candidate.content.parts.length > 0) {
@@ -880,12 +903,12 @@ async function callGeminiBasic(prompt, apiKey) {
   //console.log('🔍 Gemini API key kontrol ediliyor...');
   //console.log('API key uzunluğu:', apiKey.length);
   //console.log('API key formatı kontrol ediliyor...');
-  
+
   // API key formatı kontrol et
   if (!apiKey || apiKey.length < 20) {
     throw new Error('API key çok kısa veya boş. [Google AI Studio](https://aistudio.google.com/api-keys) adresinden yeni key alın.');
   }
-  
+
   if (!apiKey.startsWith('AIza')) {
     //console.log('⚠️ API key AIza ile başlamıyor, yine de deneniyor...');
   }
@@ -896,13 +919,13 @@ async function callGeminiBasic(prompt, apiKey) {
     const testUrl = `https://generativelanguage.googleapis.com/v1/models?key=${apiKey}`;
     const testResponse = await fetch(testUrl);
     //console.log('API key test sonucu:', testResponse.status);
-    
+
     if (!testResponse.ok) {
       const testError = await testResponse.text();
       //console.log('API key test hatası:', testError);
       throw new Error(`API key geçersiz (${testResponse.status}): ${testError}`);
     }
-    
+
     const testData = await testResponse.json();
     //console.log('✅ API key geçerli, mevcut modeller:', testData.models?.length || 0);
   } catch (testError) {
@@ -912,7 +935,7 @@ async function callGeminiBasic(prompt, apiKey) {
 
   // Ana API çağrısı - En yeni model ile
   const url = `https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-  
+
   const body = {
     contents: [{
       parts: [{ text: prompt }]
@@ -938,7 +961,7 @@ async function callGeminiBasic(prompt, apiKey) {
   if (!response.ok) {
     const errorText = await response.text();
     //console.log('❌ Gemini error response:', errorText);
-    
+
     // Özel hata mesajları
     if (response.status === 400) {
       throw new Error('API key geçersiz. [Google AI Studio](https://aistudio.google.com/api-keys) adresinden yeni key alın.');
@@ -947,7 +970,7 @@ async function callGeminiBasic(prompt, apiKey) {
     } else if (response.status === 429) {
       throw new Error('API limit aşıldı. Biraz bekleyip tekrar deneyin.');
     }
-    
+
     throw new Error(`HTTP ${response.status}: ${errorText}`);
   }
 
@@ -973,7 +996,7 @@ async function callGeminiBasic(prompt, apiKey) {
  */
 async function callCohere(prompt, apiKey) {
   try {
-    
+
     const response = await fetch('https://api.cohere.ai/v1/generate', {
       method: 'POST',
       headers: {
@@ -1006,7 +1029,7 @@ async function callCohere(prompt, apiKey) {
  */
 async function callCustomAPI(prompt, apiKey, endpoint, model = '') {
   try {
-    
+
     const requestBody = {
       messages: [
         { role: 'user', content: prompt }
@@ -1014,11 +1037,11 @@ async function callCustomAPI(prompt, apiKey, endpoint, model = '') {
       max_tokens: 1000,
       temperature: 0.7
     };
-    
+
     if (model) {
       requestBody.model = model;
     }
-    
+
     const response = await fetch(endpoint, {
       method: 'POST',
       headers: {
@@ -1033,7 +1056,7 @@ async function callCustomAPI(prompt, apiKey, endpoint, model = '') {
     }
 
     const data = await response.json();
-    
+
     if (data.choices && data.choices[0]?.message?.content) {
       return data.choices[0].message.content.trim();
     } else if (data.content && data.content[0]?.text) {
@@ -1056,7 +1079,7 @@ async function callCustomAPI(prompt, apiKey, endpoint, model = '') {
  */
 async function detectProviderFromAPIKey(apiKey) {
   if (!apiKey) return null;
-  
+
   // API key formatlarına göre provider tespiti
   if (apiKey.startsWith('sk-') && apiKey.length > 40) {
     // OpenAI format
@@ -1074,7 +1097,7 @@ async function detectProviderFromAPIKey(apiKey) {
     // Cohere format (daha spesifik)
     return 'cohere';
   }
-  
+
   return null;
 }
 
@@ -1085,16 +1108,16 @@ async function detectProviderFromAPIKey(apiKey) {
 async function sendToAI(prompt) {
   try {
     const activeProvider = await getActiveProvider();
-    
+
     if (activeProvider) {
       const apiKey = await getAPIKey(activeProvider);
-      
+
       // API key doğrulama
       const detectedProvider = await detectProviderFromAPIKey(apiKey);
-      
+
       if (detectedProvider && detectedProvider !== activeProvider) {
         //console.log(`API key ${detectedProvider} provider'ına ait ama ${activeProvider} seçili. Doğru provider'a yönlendiriliyor...`);
-        
+
         // Doğru provider'ı kullan
         if (detectedProvider === 'openai') {
           const result = await callOpenAI(prompt, apiKey);
@@ -1113,7 +1136,7 @@ async function sendToAI(prompt) {
           return { result, provider: 'Groq (Otomatik Algılandı)' };
         }
       }
-      
+
       // Normal provider kullanımı
       if (activeProvider === 'openai') {
         const result = await callOpenAI(prompt, apiKey);
@@ -1139,8 +1162,8 @@ async function sendToAI(prompt) {
         }
       }
     }
-    
-// Varsay\u0131lan: Pollinations AI (tamamen \u00fccretsiz, API key gerektirmez)
+
+    // Varsay\u0131lan: Pollinations AI (tamamen \u00fccretsiz, API key gerektirmez)
     //console.log('Varsay\u0131lan AI kullan\u0131l\u0131yor: Pollinations AI (\u00fccretsiz)');
     const result = await callPollinations(prompt);
     return { result, provider: 'Pollinations AI (\u00dccretsiz)' };
@@ -1167,59 +1190,59 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch(error => sendResponse({ success: false, error: error.message }));
     return true; // Asenkron yanıt için
 
-  // GET_SETTINGS: Ayarları getir
+    // GET_SETTINGS: Ayarları getir
   } else if (message.type === 'GET_SETTINGS') {
     getSettings()
       .then(settings => sendResponse({ success: true, data: settings }))
       .catch(error => sendResponse({ success: false, error: error.message }));
     return true;
 
-  // SAVE_SETTINGS: Ayarları kaydet
+    // SAVE_SETTINGS: Ayarları kaydet
   } else if (message.type === 'SAVE_SETTINGS') {
     saveSettings(message.data)
       .then(() => sendResponse({ success: true }))
       .catch(error => sendResponse({ success: false, error: error.message }));
     return true;
 
-  // GET_HISTORY: Geçmişi getir
+    // GET_HISTORY: Geçmişi getir
   } else if (message.type === 'GET_HISTORY') {
     getHistory()
       .then(history => sendResponse({ success: true, data: history }))
       .catch(error => sendResponse({ success: false, error: error.message }));
     return true;
 
-  // DELETE_HISTORY_ITEM: Belirli bir geçmiş kaydını sil
+    // DELETE_HISTORY_ITEM: Belirli bir geçmiş kaydını sil
   } else if (message.type === 'DELETE_HISTORY_ITEM') {
     deleteHistoryItem(message.data.index)
       .then(() => sendResponse({ success: true }))
       .catch(error => sendResponse({ success: false, error: error.message }));
     return true;
 
-  // CLEAR_HISTORY: Tüm geçmişi temizle
+    // CLEAR_HISTORY: Tüm geçmişi temizle
   } else if (message.type === 'CLEAR_HISTORY') {
     clearHistory()
       .then(() => sendResponse({ success: true }))
       .catch(error => sendResponse({ success: false, error: error.message }));
     return true;
 
-  // SAVE_API_KEY: API anahtarını kaydet
+    // SAVE_API_KEY: API anahtarını kaydet
   } else if (message.type === 'SAVE_API_KEY') {
     const { provider, apiKey, customEndpoint, customModel } = message.data;
-    
+
     // API key doğrulama (yeniden aktif)
     (async () => {
       try {
         const detectedProvider = await detectProviderFromAPIKey(apiKey);
         if (detectedProvider && detectedProvider !== provider) {
-          sendResponse({ 
-            success: false, 
-            error: `Bu API key ${detectedProvider} provider'ına ait. Lütfen doğru provider'ı seçin.` 
+          sendResponse({
+            success: false,
+            error: `Bu API key ${detectedProvider} provider'ına ait. Lütfen doğru provider'ı seçin.`
           });
           return;
         }
-        
+
         await saveAPIKey(provider, apiKey, customEndpoint, customModel);
-        
+
         // Kaydedilen sağlayıcıyı tercih olarak ayarla
         await setSelectedProvider(provider);
         const activeProvider = await getActiveProvider();
@@ -1231,7 +1254,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })();
     return true;
 
-  // DELETE_API_KEY: API anahtarını sil
+    // DELETE_API_KEY: API anahtarını sil
   } else if (message.type === 'DELETE_API_KEY') {
     deleteAPIKey(message.data.provider)
       .then(async () => {
@@ -1247,7 +1270,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch(error => sendResponse({ success: false, error: error.message }));
     return true;
 
-  // GET_PROMPT_PREVIEW: Prompt şablonunu görüntüle (AI'a göndermeden)
+    // GET_PROMPT_PREVIEW: Prompt şablonunu görüntüle (AI'a göndermeden)
   } else if (message.type === 'GET_PROMPT_PREVIEW') {
     (async () => {
       try {
@@ -1259,7 +1282,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           additionalInstructions,
           targetLanguage
         } = message.data;
-        
+
         const prompt = await getPromptTemplate(
           mainAction,
           processingStyle,
@@ -1268,7 +1291,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           additionalInstructions,
           targetLanguage
         );
-        
+
         sendResponse({ success: true, data: { prompt } });
       } catch (error) {
         sendResponse({ success: false, error: error.message });
@@ -1276,7 +1299,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })();
     return true;
 
-  // GET_ACTIVE_PROVIDER: Aktif API sağlayıcısını getir
+    // GET_ACTIVE_PROVIDER: Aktif API sağlayıcısını getir
   } else if (message.type === 'GET_ACTIVE_PROVIDER') {
     getActiveProvider()
       .then(activeProvider => sendResponse({ success: true, activeProvider }))
@@ -1312,7 +1335,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch(error => sendResponse({ success: false, error: error.message }));
     return true;
 
-  // GET_MASKED_API_KEY: Maskeli API anahtarını getir (son 4 karakter)
+    // GET_MASKED_API_KEY: Maskeli API anahtarını getir (son 4 karakter)
   } else if (message.type === 'GET_MASKED_API_KEY') {
     (async () => {
       try {
@@ -1330,7 +1353,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })();
     return true;
 
-  // OPEN_POPUP: Extension popup'ı aç
+    // OPEN_POPUP: Extension popup'ı aç
   } else if (message.type === 'OPEN_POPUP') {
     chrome.action.openPopup().catch(() => {
       // Popup açılamazsa yeni tab aç
@@ -1419,7 +1442,7 @@ async function handleProcessText(data) {
  */
 chrome.runtime.onInstalled.addListener(async () => {
   //console.log('Eklenti yüklendi, varsayılan ayarlar kontrol ediliyor...');
-  
+
   try {
     const settings = await getSettings();
     if (!settings || Object.keys(settings).length === 0) {
